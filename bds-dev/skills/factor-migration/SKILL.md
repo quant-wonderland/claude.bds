@@ -17,35 +17,21 @@ This skill guides the migration of factor computation logic from Python (pandas/
 
 **Ask user for the following information:**
 
-1. **Factor Store Path**: Where the Python factor implementations are located
-   - Default: `/home/lxb/github/factor-store`
-   - Common locations: `factor-store`, `intraday-alpha-research`, `research-toolkit`
-
-2. **Factor Name(s)**: Which factor(s) to migrate
+1. **Factor Name(s)**: Which factor(s) to migrate
    - Can be a single factor or comma-separated list
-   - Example: `compute_err`, `compute_main_force_returns`, `compute_volatility`
+   - Example: `ValueAtRiskLt95`, `RESIDUAL_ALPHA`, `compute_volatility`
 
-Use `AskUserQuestion` tool:
-
-```
-Questions:
-1. Factor Store Path - Where is the Python factor code?
-   Options:
-   - /home/lxb/github/factor-store (default)
-   - /home/lxb/github/intraday-alpha-research
-   - [Other - custom path]
-
-2. Factor Name - Which factor(s) to migrate?
-   [Free text input - e.g., compute_err, compute_volatility]
-```
+Use `AskUserQuestion` tool if factor names are not provided in the arguments.
 
 ### Step 1: Locate and Read Python Factor
 
-After getting user input, search for the factor:
+Search for the factor implementation in these repositories:
 
 ```bash
-# Find the factor file
-grep -r "def ${FACTOR_NAME}" ${FACTOR_STORE_PATH} --include="*.py"
+# Primary locations
+/home/lxb/github/factor-store
+/home/lxb/github/intraday-alpha-research
+/home/lxb/github/research-toolkit
 ```
 
 Read the factor implementation and analyze:
@@ -54,71 +40,38 @@ Read the factor implementation and analyze:
 - Computation logic
 - Output field names
 
-### Step 2: Resolve Unknown Dependencies
+### Step 2: Resolve Dependencies
 
-When encountering functions/modules with unclear definitions (e.g., `npd.ffillna`, `npd.clean`, `bn.move_sum`), ask the user for source paths:
+When encountering functions/modules with unclear definitions, trace them to their source:
 
-```
-I found references to the following libraries that I need to understand:
-- numpandas (npd.ffillna, npd.clean, npd.shift)
-- bottleneck (bn.move_sum, bn.move_std)
-- toolkit.stats (custom functions)
-
-Please provide the source code paths for these libraries:
-
-Options:
-1. numpandas - Path to numpandas repo
-   - Default: /home/lxb/github/numpandas
-   - [Other - custom path]
-
-2. research-toolkit - Path to toolkit/stats
-   - Default: /home/lxb/github/research-toolkit
-   - [Other - custom path]
-
-3. Skip - I'll infer the behavior from usage context
-```
-
-**Common library locations:**
-| Library | Default Path | Key Functions |
-|---------|--------------|---------------|
-| `numpandas` | `/home/lxb/github/numpandas` | `ffillna`, `clean`, `shift`, `align_backward` |
-| `research-toolkit` | `/home/lxb/github/research-toolkit` | `standardize`, `rolling_correlation` |
+| Library | Path | Key Functions |
+|---------|------|---------------|
+| `numpandas` | `/home/lxb/github/numpandas` | `ffillna`, `clean`, `shift`, `rolling_query_quantile` |
+| `research-toolkit` | `/home/lxb/github/research-toolkit/toolkit/stats` | `regress_multi_dimensional_by_columns`, `standardize` |
 | `bottleneck` | System package | `move_sum`, `move_std`, `move_median`, `nanargmax` |
+| `factorai` | `/home/lxb/github/factor-store/factorai` | `align_backward`, `ComputationContext` |
 
-After getting paths, read the relevant function implementations to understand:
-- NaN handling behavior
-- Edge case handling (empty arrays, all-NaN slices)
-- Parameter defaults (min_count, ddof, etc.)
+**Important Functions to Understand:**
 
-### Step 3: Check Prerequisites
+1. **`rolling_query_quantile`** - NaN-aware rolling quantile calculation
+   - Collects valid (non-NaN) values in window
+   - Sorts and indexes at quantile position
+   - Returns NaN if insufficient valid data
 
-**Inform user of required preparations:**
+2. **`regress_multi_dimensional_by_columns`** - Cross-sectional regression
+   - Takes Y (T×N) and list of X factors (T×N each)
+   - Returns betas, errors, T-values, F-values
+   - Used for ResidualAlpha type factors
 
-```markdown
-## Prerequisites Checklist
+### Step 3: Check Blitzer Patterns
 
-Before proceeding, please ensure:
+Refer to existing implementations for patterns:
 
-1. **Blitzer Codebase Access**
-   - Path: `/home/lxb/github/blitzer`
-   - You have write permissions
-
-2. **Build Environment**
-   - `nix develop` works in the blitzer directory
-   - `ninja` is available in build directory
-
-3. **Input Data Schema**
-   The factor uses these fields from `PriceVolume1MinRow`:
-   - [ ] `close` - Closing price
-   - [ ] `volume` - Trading volume
-   - [ ] `volume_rmb` - Volume in RMB (if using vwap)
-   - [ ] Other: {list any additional fields}
-
-4. **Reference Implementation**
-   Python code location: `${FACTOR_STORE_PATH}/${FACTOR_FILE}`
-
-Ready to proceed? [Y/n]
-```
+| Factor Type | Reference File | Key Pattern |
+|-------------|----------------|-------------|
+| Rolling Sum | `feature_volatility.cc` | `MoveSumState` + running sum |
+| Rolling Quantile | `feature_high_std_return_mean.cc` | `std::sort` + index at quantile |
+| Cross-sectional | `feature_residual_alpha.cc` | Market return regression |
 
 ## Prerequisites
 
@@ -138,126 +91,147 @@ Ready to proceed? [Y/n]
 | `config/slice_minbar_features_config.json` | Modify | Enable factor in runtime config |
 | `blitzer/features/slice_minbar_features_test.cc` | Modify | Add unit tests |
 
-## Workflow
+## Implementation Patterns
 
-### Step 1: Understand Python Implementation
-
-Before writing any code, thoroughly analyze the Python factor:
-
-1. **Identify inputs**: What data fields are used? (close, volume, etc.)
-2. **Window size**: Rolling window parameters (e.g., 241 bars)
-3. **Computation logic**: Step-by-step algorithm
-4. **Edge cases**: NaN handling, min_count, boundary conditions
-5. **Output fields**: What values are produced?
-
-Create a mapping table like:
-
-```markdown
-| Python | C++ |
-|--------|-----|
-| `npd.ffillna(prices)` | Forward fill with `FindLastValidPrice()` |
-| `bn.move_sum(x, window=241, min_count=1)` | `std::deque` + running sum |
-| `np.sign(returns)` | `std::copysign(1.0, returns)` |
-```
-
-### Step 2: Create Implementation File
-
-Create `blitzer/features/feature_impls/feature_xxx.cc`:
+### State Structure Template
 
 ```cpp
-#include <algorithm>
-#include <cmath>
-#include <deque>
-#include <limits>
-
-#include "blitzer/features/feature_impls/feature_common.h"
-#include "blitzer/features/slice_minbar_features.h"
-#include "marl/defer.h"
-#include "marl/waitgroup.h"
-
-namespace wonder::blitzer::features {
-
-// ========== State Structure ==========
-
 struct FeatureXxxState {
-  static constexpr int kWindow = 241;
+  static constexpr int kRollingWindow = 240;  // Match Python window
+  static constexpr double kNearZeroThreshold = 1e-8;  // For filtering
 
-  // Price/volume history
-  std::deque<double> prices;
-  std::deque<double> volumes;
-
-  // Derived data history
+  // Rolling window data
   std::deque<double> returns;
 
-  // Running statistics
+  // Forward fill state
   double last_valid_price = std::numeric_limits<double>::quiet_NaN();
-
-  // Output accumulators (for move_sum equivalent)
-  std::deque<double> output_contrib;
-  double output_sum = 0.0;
 };
+```
 
-// ========== Helper Functions ==========
+### Validity Check Pattern
 
+**IMPORTANT**: Use `valid_data_start_time` based on previous trading day:
+
+```cpp
+// Correct pattern - based on previous trading day 9:31
+static const absl::CivilSecond valid_data_start_time = []() {
+  absl::CivilDay today = prv::Take<ClockService>().Now<absl::CivilDay>();
+  absl::CivilDay prev_trade_day = utils::GetTradingDateBefore(today, 1);
+  return absl::CivilSecond(prev_trade_day.year(),
+                           prev_trade_day.month(),
+                           prev_trade_day.day(),
+                           9, 31, 0);  // 9:31 not 9:30
+}();
+
+// In the computation loop
+if (minbar.date_time < valid_data_start_time) {
+  return;  // Skip data before valid start
+}
+```
+
+### Quantile Calculation Pattern (from VaR)
+
+```cpp
+// Collect valid returns
+std::vector<double> valid_returns;
+valid_returns.reserve(kRollingWindow);
+for (const double& ret : st.returns) {
+  if (std::isfinite(ret)) {
+    valid_returns.push_back(ret);
+  }
+}
+
+if (valid_returns.empty()) {
+  out.value_at_risk = NaN;
+  return;
+}
+
+// Calculate quantile
+std::sort(valid_returns.begin(), valid_returns.end());
+size_t k = static_cast<size_t>(static_cast<double>(valid_returns.size()) * kQuantile);
+if (k >= valid_returns.size()) {
+  k = valid_returns.size() - 1;
+}
+double quantile_value = valid_returns[k];
+
+// Near-zero filtering
+if (std::abs(quantile_value) < kNearZeroThreshold) {
+  out.value_at_risk = NaN;
+} else {
+  out.value_at_risk = quantile_value;
+}
+```
+
+### Return Calculation Pattern
+
+```cpp
 static double SafeReturn(double current, double previous) {
   if (!std::isfinite(previous) || previous <= 1e-9) {
     return std::numeric_limits<double>::quiet_NaN();
   }
   double ret = (current - previous) / previous;
-  // Clean extreme values
+  // Clean extreme values (|ret| > 10.0 is unrealistic)
   if (!std::isfinite(ret) || std::abs(ret) > 10.0) {
     return std::numeric_limits<double>::quiet_NaN();
   }
   return ret;
 }
+```
 
-// ========== Single Stock Computation ==========
+### Forward Fill Pattern
 
-static void ComputeFeatureXxxSingle(const SliceMinbar& m,
-                                    FeatureXxxState& st,
-                                    FeatureResult& out,
-                                    double adj_factor) {
-  const double NaN = std::numeric_limits<double>::quiet_NaN();
-
-  // 1. Get current price with adjustment
-  double current_price = m.close * adj_factor;
-  if (!std::isfinite(current_price) || current_price <= 0) {
-    current_price = st.last_valid_price;  // Forward fill
-  }
-
-  // 2. Calculate return
-  double current_return = SafeReturn(current_price, st.last_valid_price);
-
-  // 3. Update last valid price
-  if (std::isfinite(current_price) && current_price > 0) {
-    st.last_valid_price = current_price;
-  }
-
-  // 4. Manage sliding window
-  // ... (factor-specific logic)
-
-  // 5. Compute output
-  out.xxx_field = /* computed value */;
+```cpp
+// Get current price with adjustment
+double current_price = m.close * adj_factor;
+if (!std::isfinite(current_price) || current_price <= 0) {
+  current_price = st.last_valid_price;  // Forward fill
 }
 
-// ========== Batch Processing ==========
+// Update for next iteration
+if (std::isfinite(current_price) && current_price > 0) {
+  st.last_valid_price = current_price;
+}
+```
 
+### Rolling Window Maintenance
+
+```cpp
+// Add new value
+st.returns.push_back(current_return);
+
+// Maintain window size
+while (st.returns.size() > kRollingWindow) {
+  st.returns.pop_front();
+}
+
+// Check minimum data requirement
+if (st.returns.size() < kRollingWindow) {
+  out.factor_value = NaN;
+  return;
+}
+```
+
+### Batch Processing Template
+
+```cpp
 void ComputeFeatureXxx(const std::vector<SliceMinbar>& minbars,
                        std::vector<FeatureResult>& results,
                        const std::vector<double>& adj_factors,
-                       const std::vector<SharedFeatureState>& shared_states,
+                       const std::vector<SharedFeatureState>& /* shared_states */,
                        marl::Scheduler& scheduler) {
   static std::vector<FeatureXxxState> states;
   InitializeAndValidateStates(states, minbars, "FeatureXxx");
 
-  marl::WaitGroup wg;
+  // Valid data start time
+  static const absl::CivilSecond valid_data_start_time = /* ... */;
+
+  marl::WaitGroup wg(minbars.size());
   for (size_t i = 0; i < minbars.size(); ++i) {
-    wg.add(1);
-    marl::schedule([&, i] {
+    scheduler.enqueue(marl::Task{[&, i, wg]() {
       defer(wg.done());
 
       const auto& minbar = minbars[i];
-      if (!shared_states[i].is_valid) {
+      if (minbar.date_time < valid_data_start_time) {
         return;
       }
 
@@ -266,15 +240,61 @@ void ComputeFeatureXxx(const std::vector<SliceMinbar>& minbars,
       double adj_factor = adj_factors[i];
 
       ComputeFeatureXxxSingle(minbar, state, result, adj_factor);
-    });
+    }});
   }
   wg.wait();
 }
-
-}  // namespace wonder::blitzer::features
 ```
 
-### Step 3: Update Header Files
+## Validation Workflow
+
+### Step 1: Build and Run Tests
+
+```bash
+cd /home/lxb/github/blitzer
+nix develop
+cd build
+ninja slice_minbar_features
+ninja slice_minbar_features_test
+./test/slice_minbar_features_test --gtest_filter="*Xxx*"
+```
+
+### Step 2: Compare with Python Output
+
+用户提供对比脚本位于 `/home/lxb/github/factor-store/notebook/` 目录下。
+
+请用户提供或创建对比 notebook，包含以下逻辑：
+
+```python
+# 1. 加载 online (C++) 数据
+from toolkit.data_loader import load_data, DateSpec, IsStock
+online_data = load_data(
+    path="/var/lib/wonder/warehouse/database/lxb/T0FactorData/factors/...",
+    date=DateSpec(start="2026-01-30", end="2026-01-30"),
+    filter=IsStock()
+)
+
+# 2. 加载 offline (Python) 数据 - 使用 factor-store 计算
+# ... 运行 Python 因子计算逻辑 ...
+
+# 3. 对比差异
+diff = online_data["factor_name"] - offline_data["factor_name"]
+print(f"Max diff: {diff.abs().max()}")
+print(f"Mean diff: {diff.abs().mean()}")
+
+# 4. 检查特定股票
+problem_stocks = diff[diff.abs() > 1e-6].index
+print(f"Problem stocks: {problem_stocks}")
+```
+
+### Common Issues to Check
+
+1. **kMinPeriods 差异**: 前几根 bar 可能因最小周期设置不同而有差异
+2. **NaN 处理差异**: 确保 NaN 传播逻辑一致
+3. **Forward Fill 差异**: 确保价格填充逻辑完全匹配
+4. **边界条件**: 第一分钟 (9:31) 的数据可能需要特殊处理
+
+## Update Header Files
 
 **In `feature_common.h`**, add function declaration:
 
@@ -303,17 +323,17 @@ struct FeatureResult {
 codec.Add("XxxField", &blitzer::features::FeatureResult::xxx_field);
 ```
 
-### Step 4: Register Factor
+## Register Factor
 
 **In `slice_minbar_features.cc`**, find `BuildComputeFuncs` and add:
 
 ```cpp
-if (enabled.count("xxx_field")) {
-  funcs.push_back(&ComputeFeatureXxx);
+if (enabled_set.contains("xxx_field")) {
+  funcs.push_back({"xxx_field", ComputeFeatureXxx});
 }
 ```
 
-### Step 5: Update CMakeLists.txt
+## Update CMakeLists.txt
 
 Add to `slice_minbar_features` target:
 
@@ -326,26 +346,21 @@ target_sources(
   ...)
 ```
 
-### Step 6: Update Runtime Config
+## Update Runtime Config
 
-**In `config/slice_minbar_features_config.json`**, add new factor fields to enable them:
+**In `config/slice_minbar_features_config.json`**, add new factor fields:
 
 ```json
 {
-  "enabled_features": [
+  "enable_features": [
     "prices_err",
     "upward_std_bias",
-    "vsa_ratio",
-    "vsa_low_to_max",
-    "evv",
     "xxx_field"
   ]
 }
 ```
 
-**Note**: The factor name in the config must match the field name in `FeatureResult` and the key used in `BuildComputeFuncs`.
-
-### Step 7: Add Unit Tests
+## Add Unit Tests
 
 **In `slice_minbar_features_test.cc`**:
 
@@ -360,11 +375,11 @@ std::unordered_set<std::string> all_features = {
 2. Add test cases:
 ```cpp
 TEST_F(SliceMinbarFeaturesTest, XxxInsufficientDataTest) {
-  // Test with < window size data points
+  // Test with < window size data points → should return NaN
 }
 
 TEST_F(SliceMinbarFeaturesTest, XxxFullWindowTest) {
-  // Test with full window
+  // Test with full window → should return valid values
 }
 
 TEST_F(SliceMinbarFeaturesTest, XxxEdgeCasesTest) {
@@ -372,93 +387,14 @@ TEST_F(SliceMinbarFeaturesTest, XxxEdgeCasesTest) {
 }
 ```
 
-### Step 8: Build and Test
-
-```bash
-cd /home/lxb/github/blitzer
-nix develop
-cd build
-ninja slice_minbar_features
-ninja slice_minbar_features_test
-./test/slice_minbar_features_test --gtest_filter="*Xxx*"
-```
-
-## Common Patterns
-
-### Rolling Sum (move_sum equivalent)
-
-```cpp
-// Maintain deque and running sum
-if (st.contrib_queue.size() >= kWindow) {
-  st.running_sum -= st.contrib_queue.front();
-  st.contrib_queue.pop_front();
-}
-st.contrib_queue.push_back(contribution);
-st.running_sum += contribution;
-
-// Output (with min_count handling)
-out.field = (st.contrib_queue.size() >= min_count) ? st.running_sum : NaN;
-```
-
-### Forward Fill
-
-```cpp
-double current_price = m.close * adj_factor;
-if (!std::isfinite(current_price) || current_price <= 0) {
-  current_price = st.last_valid_price;  // Use previous valid value
-}
-// Update for next iteration
-if (std::isfinite(current_price) && current_price > 0) {
-  st.last_valid_price = current_price;
-}
-```
-
-### Direction Detection with Forward Fill
-
-```cpp
-int direction = 0;
-if (current_return > 0) direction = 1;
-else if (current_return < 0) direction = -1;
-else direction = st.last_direction;  // Forward fill when return == 0
-st.last_direction = direction;
-```
-
-### Running Max/Min
-
-```cpp
-if (score > st.running_max) {
-  st.running_max = score;
-  is_new_max = true;
-}
-```
-
-## Important Notes
-
-### Price Handling
-- Always apply `adj_factor` for stock split adjustment
-- Forward fill invalid prices (NaN, <= 0)
-- Use `volume_rmb / volume` when vwap price is needed
-
-### Return Calculation
-- Formula: `(price - lag_price) / lag_price`
-- Clean extreme values: filter `|ret| > 10.0`
-- Handle division by zero
-
-### Test Data Setup
-- Ensure `CreateTestBar` sets `volume_rmb = close * volume`
-- Add new factor names to `all_features` in SetUp
-
-### Debugging Tips
-- Use `spdlog::debug()` for intermediate values
-- Compare with Python output for specific timestamps
-- Check window boundary conditions carefully
-
 ## Verification Checklist
 
 - [ ] State structure with correct window size
+- [ ] Validity check using `valid_data_start_time` (9:31 AM previous trading day)
 - [ ] Price adjustment and forward fill
-- [ ] Return calculation with cleaning
-- [ ] Sliding window management
+- [ ] Return calculation with extreme value cleaning
+- [ ] Sliding window maintenance
+- [ ] Near-zero value filtering (if applicable)
 - [ ] Function declaration in header (`feature_common.h`)
 - [ ] FeatureResult fields added (`slice_minbar_features.h`)
 - [ ] Parquet codec mapping (`slice_minbar_features.h`)
@@ -468,4 +404,12 @@ if (score > st.running_max) {
 - [ ] Unit tests added (`slice_minbar_features_test.cc`)
 - [ ] Compilation successful
 - [ ] Tests pass
-- [ ] Output matches Python implementation
+- [ ] Output matches Python implementation (using notebook comparison)
+
+## Common Pitfalls
+
+1. **Wrong validity check**: Don't use `shared_states[i].is_valid`, use `valid_data_start_time`
+2. **Start time off-by-one**: Python lookback=240 aligns with 9:31, not 9:30
+3. **Missing near-zero filter**: Some factors filter `|value| < 1e-8` to NaN
+4. **NaN propagation**: Ensure `std::isfinite()` checks are consistent
+5. **Window not full**: Return NaN until window has enough data
