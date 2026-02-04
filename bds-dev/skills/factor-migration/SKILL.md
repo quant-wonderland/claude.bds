@@ -389,12 +389,17 @@ TEST_F(SliceMinbarFeaturesTest, XxxEdgeCasesTest) {
 
 ## Verification Checklist
 
+### Implementation
 - [ ] State structure with correct window size
 - [ ] Validity check using `valid_data_start_time` (9:31 AM previous trading day)
-- [ ] Price adjustment and forward fill
+- [ ] Price adjustment (check if fillna is needed based on Python code)
 - [ ] Return calculation with extreme value cleaning
 - [ ] Sliding window maintenance
 - [ ] Near-zero value filtering (if applicable)
+- [ ] Quantile calculation uses (n-1) scaling + linear interpolation (if applicable)
+- [ ] `kMinPeriods` matches Python's `min_count` parameter
+
+### Integration
 - [ ] Function declaration in header (`feature_common.h`)
 - [ ] FeatureResult fields added (`slice_minbar_features.h`)
 - [ ] Parquet codec mapping (`slice_minbar_features.h`)
@@ -402,9 +407,13 @@ TEST_F(SliceMinbarFeaturesTest, XxxEdgeCasesTest) {
 - [ ] CMakeLists.txt updated
 - [ ] Runtime config updated (`config/slice_minbar_features_config.json`)
 - [ ] Unit tests added (`slice_minbar_features_test.cc`)
+
+### Validation
 - [ ] Compilation successful
 - [ ] Tests pass
 - [ ] Output matches Python implementation (using notebook comparison)
+- [ ] Same stock universe used for comparison
+- [ ] First few bars (kMinPeriods) handled correctly
 
 ## Common Pitfalls
 
@@ -413,3 +422,9 @@ TEST_F(SliceMinbarFeaturesTest, XxxEdgeCasesTest) {
 3. **Missing near-zero filter**: Some factors filter `|value| < 1e-8` to NaN
 4. **NaN propagation**: Ensure `std::isfinite()` checks are consistent
 5. **Window not full**: Return NaN until window has enough data
+6. **Quantile precision mismatch**: C++ default uses `n` scaling, Python (npdpp/splay_ranker) uses `(n-1)` scaling + linear interpolation. For quantile-based factors (VaR, etc.), implement `compute_quantile` lambda with:
+   - Position: `q * (n - 1)` instead of `q * n`
+   - Linear interpolation between floor and ceil indices
+7. **Unnecessary fillna**: Not all factors need price forward-fill. Check Python implementation carefully - some factors (like VaR) don't use `npd.ffillna(prices)`
+8. **kMinPeriods mismatch**: First few bars may differ due to `min_count` parameter. Ensure C++ `kMinPeriods` matches Python's `min_count` exactly
+9. **Universe differences**: When comparing C++ vs Python, ensure both use the same stock universe. Some stocks may have values in C++ but NaN in Python due to different universe filters
